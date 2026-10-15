@@ -27,7 +27,8 @@ MODEL = "face_landmarker.task"
 ap = argparse.ArgumentParser()
 ap.add_argument("--camera", type=int, default=0)
 ap.add_argument("--per", type=int, default=1, help="mouth openings in ONE full mantra")
-ap.add_argument("--min-gap", type=float, default=0.12, help="min seconds between two chants")
+ap.add_argument("--min-gap", type=float, default=0.30,
+                help="COMPULSORY minimum seconds between two counted chants (default 0.30)")
 ap.add_argument("--closed-secs", type=float, default=5)
 ap.add_argument("--chant-secs", type=float, default=7)
 ap.add_argument("--sensitivity", type=float, default=0.45,
@@ -42,15 +43,37 @@ lm = vision.FaceLandmarker.create_from_options(vision.FaceLandmarkerOptions(
     base_options=mpp.BaseOptions(model_asset_path=MODEL),
     running_mode=vision.RunningMode.VIDEO, num_faces=1))
 
-# (upper inner lip, lower inner lip) pairs at three places along the mouth, averaged for stability
-PAIRS = [(13, 14), (82, 87), (312, 317)]
-
 def dist(a, b, w, h):
     return math.hypot((a.x - b.x) * w, (a.y - b.y) * h)
 
-def lip_gap(p, w, h):
+def valley_width(prof):
+    """Width (in pixel rows, sub-pixel) of the dark band between the lips along a vertical brightness profile.
+    Closed lips = thin dark line (~1-2 px). Lips apart = a thicker dark band."""
+    p = cv2.GaussianBlur(prof.reshape(-1, 1).astype(np.float32), (1, 5), 0).ravel()
+    if len(p) < 16:
+        return 0.0
+    i = int(np.argmin(p[3:-3])) + 3
+    top = np.percentile(p[:max(i - 4, 2)], 70) if i > 6 else p.max()
+    bot = np.percentile(p[i + 4:], 70) if len(p) - i > 8 else p.max()
+    ref = 0.5 * (top + bot)
+    if ref - p[i] < 2:
+        return 0.0
+    th = p[i] + 0.5 * (ref - p[i])
+    a = i
+    while a > 0 and p[a] < th:
+        a -= 1
+    b = i
+    while b < len(p) - 1 and p[b] < th:
+        b += 1
+    return float(b - a)
+
+# (upper inner lip, lower inner lip) pairs at three places along the mouth, averaged for stability
+PAIRS = [(13, 14), (82, 87), (312, 317)]
+
+def lip_gap(p, w, h, gray=None):
+    """Lip gap from the face-tracking lip points, relative to mouth width."""
     g = sum(dist(p[a], p[b], w, h) for a, b in PAIRS) / len(PAIRS)
-    return g / max(dist(p[78], p[308], w, h), 1e-6)     # relative to mouth width
+    return g / max(dist(p[78], p[308], w, h), 1e-6)
 
 def start_learning():
     return {"phase": "wait", "t": 0.0, "closed": [], "chant": []}
@@ -72,7 +95,7 @@ while True:
     msg, gap = "no face", None
     if res.face_landmarks:
         p = res.face_landmarks[0]
-        gap = lip_gap(p, w, h)
+        gap = lip_gap(p, w, h, cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
         sm = gap if sm is None else 0.5 * sm + 0.5 * gap
         for i in (13, 14, 82, 87, 312, 317):
             cv2.circle(frame, (int(p[i].x * w), int(p[i].y * h)), 2, (0, 165, 255), -1)
